@@ -82,6 +82,7 @@ from statsmodels.regression.linear_model import OLS
 from statsmodels.tools.tools import add_constant
 from statsmodels.tsa.api import VAR
 from statsmodels.tsa.stattools import grangercausalitytests
+from pdm import compute_pioneer_weights_angles, pooled_forecast 
 
 def fetch_ecb_hicp_inflation_panel(
     countries,
@@ -170,114 +171,114 @@ infl_panel, infl_long = fetch_ecb_hicp_inflation_panel(
 
 # -----------------------------------
 # Fetch Ukraine inflation time series
-
-def fetch_ukraine_cpi_prev_month_raw(
-    start="2000-01",
-    end="2025-12",
-    timeout=60
-):
-    """
-    Fetch Ukraine CPI (previous month = 100) from the SSSU SDMX API v3 and return
-    the raw SDMX-CSV as a DataFrame (no date/numeric parsing).
-    """
-    base = "https://stat.gov.ua/sdmx/workspaces/default:integration/registry/sdmx/3.0/data"
-    agency = "SSSU"
-    flow = "DF_PRICE_CHANGE_CONSUMER_GOODS_SERVICE"
-    version = "~"
-    key = "INDEX_CONSUMPRICE.PREV_MONTH.UA00000000000000000.0.M"
-
-    url = f"{base}/dataflow/{agency}/{flow}/{version}/{key}"
-    params = {"c[TIME_PERIOD]": f"ge:{start}+le:{end}"}
-    headers = {
-        "Accept": "application/vnd.sdmx.data+csv;version=2.0.0;labels=id;timeFormat=normalized;keys=both",
-        "User-Agent": "Mozilla/5.0",
-    }
-
-    r = requests.get(url, params=params, headers=headers, timeout=timeout)
-    r.raise_for_status()
-
-    raw = pd.read_csv(StringIO(r.text), dtype=str)
-
-    # --- MINIMAL FIX: some responses include metadata rows.
-    # Keep only rows that look like monthly observations and have OBS_VALUE.
-    raw = raw.loc[
-        raw["TIME_PERIOD"].astype(str).str.match(r"^\d{4}-M\d{2}$", na=False)
-        & raw["OBS_VALUE"].notna()
-    ].copy()
-
-    return raw
-
-
-# Example
-ua_raw = fetch_ukraine_cpi_prev_month_raw(start="2000-01", end="2025-12")
-print(ua_raw.head())
-print(ua_raw["TIME_PERIOD"].unique()[:12])
-print(ua_raw["OBS_VALUE"].unique()[:12])
-
-
-
-# ua_raw is your DataFrame as read from the SDMX-CSV response
-# (i.e., it already has columns like TIME_PERIOD, OBS_VALUE)
-
-def ua_raw_to_monthly_series(ua_raw: pd.DataFrame) -> pd.Series:
-    """
-    Build a clean monthly time series from SSSU SDMX-CSV raw output.
-
-    Input:
-      ua_raw: DataFrame with at least TIME_PERIOD like '2000-M01' and OBS_VALUE strings.
-
-    Output:
-      pd.Series indexed by month-start Timestamp, name='UA_IDX_PREV_MONTH_100'
-    """
-    if "TIME_PERIOD" not in ua_raw.columns or "OBS_VALUE" not in ua_raw.columns:
-        raise ValueError(f"ua_raw must contain TIME_PERIOD and OBS_VALUE. Columns: {list(ua_raw.columns)}")
-
-    s = ua_raw[["TIME_PERIOD", "OBS_VALUE"]].copy()
-
-    # Keep only true monthly tokens like YYYY-Mmm (defensive)
-    s["TIME_PERIOD"] = s["TIME_PERIOD"].astype(str).str.strip()
-    s = s[s["TIME_PERIOD"].str.match(r"^\d{4}-M\d{2}$", na=False)]
-
-    # Convert 'YYYY-Mmm' -> Timestamp at month start
-    # Example: '2000-M01' -> '2000-01-01'
-    s["TIME_PERIOD"] = pd.to_datetime(
-        s["TIME_PERIOD"].str.replace(r"^(\d{4})-M(\d{2})$", r"\1-\2-01", regex=True),
-        errors="coerce"
-    )
-
-    # Values
-    s["OBS_VALUE"] = pd.to_numeric(s["OBS_VALUE"].astype(str).str.replace(",", ".", regex=False),
-                                   errors="coerce")
-
-    s = s.dropna(subset=["TIME_PERIOD", "OBS_VALUE"]).sort_values("TIME_PERIOD")
-
-    out = s.set_index("TIME_PERIOD")["OBS_VALUE"].rename("UA_IDX_PREV_MONTH_100")
-
-    # If duplicates exist for a month (shouldn't, but safe): keep last
-    out = out.groupby(level=0).last()
-
-    return out
-
-# Build the monthly series (prev month = 100)
-ua_idx = ua_raw_to_monthly_series(ua_raw)
-
-# Optional: restrict window (month-start)
-ua_idx = ua_idx.loc["2000-01-01":"2025-12-01"]
-
-# If you still need y/y inflation (%):
-def cpi_prev_month_index_to_yoy_inflation(idx_prev_month_100: pd.Series) -> pd.Series:
-    monthly_factor = (idx_prev_month_100 / 100.0).astype(float)
-    yoy_factor = monthly_factor.rolling(12).apply(np.prod, raw=True)
-    return ((yoy_factor - 1.0) * 100.0).rename("UA")
-
-ua_yoy = cpi_prev_month_index_to_yoy_inflation(ua_idx)
-
-# Ensure month-start indices match
-infl_panel = infl_panel.copy()
-infl_panel.index = pd.to_datetime(infl_panel.index).to_period("M").to_timestamp(how="start")
-ua_yoy.index = pd.to_datetime(ua_yoy.index).to_period("M").to_timestamp(how="start")
-
-infl_panel = infl_panel.join(ua_yoy, how="left")
+# -----------------------------------
+# def fetch_ukraine_cpi_prev_month_raw(
+#     start="2000-01",
+#     end="2025-12",
+#     timeout=60
+# ):
+#     """
+#     Fetch Ukraine CPI (previous month = 100) from the SSSU SDMX API v3 and return
+#     the raw SDMX-CSV as a DataFrame (no date/numeric parsing).
+#     """
+#     base = "https://stat.gov.ua/sdmx/workspaces/default:integration/registry/sdmx/3.0/data"
+#     agency = "SSSU"
+#     flow = "DF_PRICE_CHANGE_CONSUMER_GOODS_SERVICE"
+#     version = "~"
+#     key = "INDEX_CONSUMPRICE.PREV_MONTH.UA00000000000000000.0.M"
+#
+#     url = f"{base}/dataflow/{agency}/{flow}/{version}/{key}"
+#     params = {"c[TIME_PERIOD]": f"ge:{start}+le:{end}"}
+#     headers = {
+#         "Accept": "application/vnd.sdmx.data+csv;version=2.0.0;labels=id;timeFormat=normalized;keys=both",
+#         "User-Agent": "Mozilla/5.0",
+#     }
+#
+#     r = requests.get(url, params=params, headers=headers, timeout=timeout)
+#     r.raise_for_status()
+#
+#     raw = pd.read_csv(StringIO(r.text), dtype=str)
+#
+#     # --- MINIMAL FIX: some responses include metadata rows.
+#     # Keep only rows that look like monthly observations and have OBS_VALUE.
+#     raw = raw.loc[
+#         raw["TIME_PERIOD"].astype(str).str.match(r"^\d{4}-M\d{2}$", na=False)
+#         & raw["OBS_VALUE"].notna()
+#     ].copy()
+#
+#     return raw
+#
+#
+# # Example
+# ua_raw = fetch_ukraine_cpi_prev_month_raw(start="2000-01", end="2025-12")
+# print(ua_raw.head())
+# print(ua_raw["TIME_PERIOD"].unique()[:12])
+# print(ua_raw["OBS_VALUE"].unique()[:12])
+#
+#
+#
+# # ua_raw is your DataFrame as read from the SDMX-CSV response
+# # (i.e., it already has columns like TIME_PERIOD, OBS_VALUE)
+#
+# def ua_raw_to_monthly_series(ua_raw: pd.DataFrame) -> pd.Series:
+#     """
+#     Build a clean monthly time series from SSSU SDMX-CSV raw output.
+#
+#     Input:
+#       ua_raw: DataFrame with at least TIME_PERIOD like '2000-M01' and OBS_VALUE strings.
+#
+#     Output:
+#       pd.Series indexed by month-start Timestamp, name='UA_IDX_PREV_MONTH_100'
+#     """
+#     if "TIME_PERIOD" not in ua_raw.columns or "OBS_VALUE" not in ua_raw.columns:
+#         raise ValueError(f"ua_raw must contain TIME_PERIOD and OBS_VALUE. Columns: {list(ua_raw.columns)}")
+#
+#     s = ua_raw[["TIME_PERIOD", "OBS_VALUE"]].copy()
+#
+#     # Keep only true monthly tokens like YYYY-Mmm (defensive)
+#     s["TIME_PERIOD"] = s["TIME_PERIOD"].astype(str).str.strip()
+#     s = s[s["TIME_PERIOD"].str.match(r"^\d{4}-M\d{2}$", na=False)]
+#
+#     # Convert 'YYYY-Mmm' -> Timestamp at month start
+#     # Example: '2000-M01' -> '2000-01-01'
+#     s["TIME_PERIOD"] = pd.to_datetime(
+#         s["TIME_PERIOD"].str.replace(r"^(\d{4})-M(\d{2})$", r"\1-\2-01", regex=True),
+#         errors="coerce"
+#     )
+#
+#     # Values
+#     s["OBS_VALUE"] = pd.to_numeric(s["OBS_VALUE"].astype(str).str.replace(",", ".", regex=False),
+#                                    errors="coerce")
+#
+#     s = s.dropna(subset=["TIME_PERIOD", "OBS_VALUE"]).sort_values("TIME_PERIOD")
+#
+#     out = s.set_index("TIME_PERIOD")["OBS_VALUE"].rename("UA_IDX_PREV_MONTH_100")
+#
+#     # If duplicates exist for a month (shouldn't, but safe): keep last
+#     out = out.groupby(level=0).last()
+#
+#     return out
+#
+# # Build the monthly series (prev month = 100)
+# ua_idx = ua_raw_to_monthly_series(ua_raw)
+#
+# # Optional: restrict window (month-start)
+# ua_idx = ua_idx.loc["2000-01-01":"2025-12-01"]
+#
+# # If you still need y/y inflation (%):
+# def cpi_prev_month_index_to_yoy_inflation(idx_prev_month_100: pd.Series) -> pd.Series:
+#     monthly_factor = (idx_prev_month_100 / 100.0).astype(float)
+#     yoy_factor = monthly_factor.rolling(12).apply(np.prod, raw=True)
+#     return ((yoy_factor - 1.0) * 100.0).rename("UA")
+#
+# ua_yoy = cpi_prev_month_index_to_yoy_inflation(ua_idx)
+#
+# # Ensure month-start indices match
+# infl_panel = infl_panel.copy()
+# infl_panel.index = pd.to_datetime(infl_panel.index).to_period("M").to_timestamp(how="start")
+# ua_yoy.index = pd.to_datetime(ua_yoy.index).to_period("M").to_timestamp(how="start")
+#
+# infl_panel = infl_panel.join(ua_yoy, how="left")
 
 
 # ------------------------------------------------------------
@@ -325,20 +326,20 @@ adf_table = pd.DataFrame(adf_results).sort_values("pvalue")
 print(adf_table.to_string(index=False))
 
 # -------------------------
-# 2) Granger causality: X → UA
+# 2) Granger causality: X → FR
 #    (bivariate, simple ranking)
 # -------------------------
 maxlag = 6   # keep small for undergrads
 
-print("\n=== Granger causality tests: X → UA ===")
+print("\n=== Granger causality tests: X → FR ===")
 
 granger_out = []
 
 for c in df.columns:
-    if c == "UA":
+    if c == "FR":
         continue
 
-    data_gc = df[["UA", c]]
+    data_gc = df[["FR", c]]
 
     try:
         res = grangercausalitytests(data_gc, maxlag=maxlag, verbose=False)
@@ -360,15 +361,15 @@ granger_rank = (
     .reset_index(drop=True)
 )
 
-print("\n=== Ranking of countries by Granger causality for UA ===")
+print("\n=== Ranking of countries by Granger causality for FR ===")
 print(granger_rank.to_string(index=False))
 
 # -------------------------
 # 3) Simple VAR with BIC
-#    (UA + top 2 predictors)
+#    (FR + top 2 predictors)
 # -------------------------
 top_countries = granger_rank["country"].iloc[:2].tolist()
-var_vars = ["UA"] + top_countries
+var_vars = ["FR"] + top_countries
 
 print("\nVAR variables:", var_vars)
 
@@ -389,3 +390,79 @@ var_res = model.fit(p)
 print("\n=== VAR estimation results ===")
 print(var_res.summary())
 
+
+#Pioner detection method:
+weights_pdm = compute_pioneer_weights_angles(df)
+
+# PDM weight of France over time
+plt.figure(figsize=(12, 5))
+plt.plot(weights_pdm.index, weights_pdm["FR"], label="FR pioneer weight")
+plt.axhline(0, color="black", linewidth=0.8, linestyle="--")
+plt.title("PDM weight of France over time")
+plt.xlabel("Time")
+plt.ylabel("Pioneer weight")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# PDM weights: all countries
+plt.figure(figsize=(12, 6))
+for col in weights_pdm.columns:
+    plt.plot(weights_pdm.index, weights_pdm[col], label=col, linewidth=1)
+plt.title("PDM weights: all countries")
+plt.xlabel("Time")
+plt.ylabel("Pioneer weight")
+plt.legend(ncol=3, fontsize=9, frameon=False)
+plt.tight_layout()
+plt.show()
+
+
+# PDM pooled forecast vs simple mean
+pooled_pdm = pooled_forecast(df, weights_pdm)
+pooled_mean = df.mean(axis=1)
+
+plt.figure(figsize=(12, 5))
+plt.plot(pooled_pdm.index, pooled_pdm, label="PDM pooled forecast", linewidth=1.5)
+plt.plot(pooled_mean.index, pooled_mean, label="Simple mean", linewidth=1.5, linestyle="--")
+plt.axhline(0, color="black", linewidth=0.8, linestyle="--")
+plt.title("PDM pooled forecast vs simple mean")
+plt.xlabel("Time")
+plt.ylabel("Inflation rate (y/y, %)")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Pioneer frequency by country
+pioneer_freq = (weights_pdm > 0).sum() / len(weights_pdm) * 100
+print("\n=== Pioneer frequency by country (% of periods) ===")
+print(pioneer_freq.sort_values(ascending=False).to_string())
+
+
+"""
+Interpretation 
+
+The PDM is applied to a panel of 11 euro area HICP inflation series from 2000 to 2025. 
+Each country is treated as an expert whose inflation rate is observed each month. 
+The aim of this method is to detect which country moves first in the right direction, i.e., 
+which country experiences increasing or decreasing inflation before the others 
+and in which direction all countries will eventually move.
+
+Overall, inflation dynamics in the euro area are quite similar, with several distinct phases: 
+- inflation was relatively moderate in the early 2000s, 
+- fell sharply during the 2008-2009 financial crisis, 
+- remained very low between 2013 and 2020, 
+- and then rose very sharply during the 2022-2023 inflation surge. 
+Greece has experienced a rather unusual pattern of inflation, with a period of deflation due to its sovereign debt crisis.
+
+The results show that no country is systematically at the forefront in leading inflation in the euro area. 
+The pioneer role is not permanent and evolves over time. 
+France, for example, is not a permanent pioneer since its PDM weight is often low 
+but may temporarily rise in large turning points in inflation. 
+Germany is often regarded as the anchor of euro area inflation 
+but is surprisingly rarely a pioneer, indicating that it follows the general trend.
+
+Lastly, the PDM pooled forecast is generally very close to the simple average of all individual country forecasts. 
+The main exception is in periods of large inflation shocks, like in 2022-2023, 
+when the PDM reacts more quickly by putting more weight on countries that have higher inflation increases earlier on. 
+This confirms that this method is particularly valuable in periods of large changes in inflation.
+"""
